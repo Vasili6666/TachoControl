@@ -77,6 +77,33 @@ class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
     }
   }
 
+  Future<void> _deleteRow(int id) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить запись?'),
+        content: const Text('Эта строка будет удалена из базы данных.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    await ShiftDatabase.deleteRow(id);
+    if (!mounted) return;
+    setState(() {
+      _rowsFuture = ShiftDatabase.getLast56Days();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -123,7 +150,7 @@ class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
             }
 
             final rows = snapshot.data!;
-            return _HistoryTable(rows: rows);
+            return _HistoryTable(rows: rows, onDelete: _deleteRow);
           },
         ),
       ),
@@ -132,9 +159,10 @@ class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
 }
 
 class _HistoryTable extends StatelessWidget {
-  const _HistoryTable({required this.rows});
+  const _HistoryTable({required this.rows, required this.onDelete});
 
   final List<Map<String, Object?>> rows;
+  final Future<void> Function(int id) onDelete;
 
   String _formatDate(String value) {
     final date = DateTime.tryParse(value);
@@ -222,6 +250,7 @@ class _HistoryTable extends StatelessWidget {
                 6: FlexColumnWidth(0.8),
                 7: FlexColumnWidth(1.2),
                 8: FlexColumnWidth(0.9),
+                9: FlexColumnWidth(0.6),
               },
               children: [
                 TableRow(
@@ -236,6 +265,7 @@ class _HistoryTable extends StatelessWidget {
                     _TableHeaderCell('Balance'),
                     _TableHeaderCell('Odometer'),
                     _TableHeaderCell('Kilometer'),
+                    _TableHeaderCell(''),
                   ],
                 ),
                 ...rows.asMap().entries.map((entry) {
@@ -252,6 +282,7 @@ class _HistoryTable extends StatelessWidget {
                       : rows[index - 1]['end_at']?.toString() ?? '';
                   final rest = _formatRest(start, previousEnd);
                   final balance = _formatBalance(rest);
+                  final id = int.tryParse(row['id']?.toString() ?? '');
                   return TableRow(
                     decoration: BoxDecoration(
                       color:
@@ -275,6 +306,9 @@ class _HistoryTable extends StatelessWidget {
                       _TableCell(mileage),
                       _TableCell(
                         _formatKilometers(mileage, previousMileage),
+                      ),
+                      _DeleteCell(
+                        onPressed: id == null ? null : () => onDelete(id),
                       ),
                     ],
                   );
@@ -337,6 +371,26 @@ class _TableCell extends StatelessWidget {
             color: textColor,
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _DeleteCell extends StatelessWidget {
+  const _DeleteCell({required this.onPressed});
+
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 42,
+      child: IconButton(
+        onPressed: onPressed,
+        padding: EdgeInsets.zero,
+        iconSize: 16,
+        tooltip: 'Удалить строку',
+        icon: const Icon(Icons.delete_outline, color: Colors.red),
       ),
     );
   }
@@ -405,6 +459,15 @@ class ShiftDatabase {
       where: 'created_at >= ?',
       whereArgs: [cutoff],
       orderBy: 'created_at ASC',
+    );
+  }
+
+  static Future<void> deleteRow(int id) async {
+    final db = await database;
+    await db.delete(
+      'shifts',
+      where: 'id = ?',
+      whereArgs: [id],
     );
   }
 
