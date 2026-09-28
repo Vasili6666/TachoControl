@@ -1,0 +1,1088 @@
+import 'dart:io';
+import 'dart:typed_data';
+import 'dart:convert';
+
+import 'package:csv/csv.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:sqflite/sqflite.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'TachoControl',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+        useMaterial3: true,
+      ),
+      home: const MyHomePage(),
+    );
+  }
+}
+
+class ShiftHistoryPage extends StatefulWidget {
+  const ShiftHistoryPage({super.key});
+
+  @override
+  State<ShiftHistoryPage> createState() => _ShiftHistoryPageState();
+}
+
+class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
+  late Future<List<Map<String, Object?>>> _rowsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _rowsFuture = ShiftDatabase.getLast56Days();
+  }
+
+  Future<void> _restoreCsv() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['csv'],
+      withData: true,
+    );
+    if (!mounted || result == null || result.files.single.bytes == null) {
+      return;
+    }
+
+    try {
+      final count = await ShiftDatabase.restoreCsv(
+        result.files.single.bytes!,
+      );
+      if (!mounted) return;
+      setState(() {
+        _rowsFuture = ShiftDatabase.getLast56Days();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Восстановлено записей: $count')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка восстановления: $error')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: const Text('History 56 days'),
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        actions: [
+          IconButton(
+            tooltip: 'Restore CSV',
+            icon: const Icon(Icons.restore),
+            onPressed: _restoreCsv,
+          ),
+          IconButton(
+            tooltip: 'Export CSV',
+            icon: const Icon(Icons.file_download),
+            onPressed: () async {
+              final message = await ShiftDatabase.exportCsv();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(message)),
+              );
+            },
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: FutureBuilder<List<Map<String, Object?>>>(
+          future: _rowsFuture,
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return Center(
+                child: Text(
+                  'Ошибка загрузки таблицы: ${snapshot.error}',
+                  style: const TextStyle(color: Colors.white),
+                  textAlign: TextAlign.center,
+                ),
+              );
+            }
+            if (!snapshot.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+
+            final rows = snapshot.data!;
+            return _HistoryTable(rows: rows);
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _HistoryTable extends StatelessWidget {
+  const _HistoryTable({required this.rows});
+
+  final List<Map<String, Object?>> rows;
+
+  String _formatDate(String value) {
+    final date = DateTime.tryParse(value);
+    if (date == null) return '';
+    return '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.${date.year}';
+  }
+
+  String _formatTime(String value) {
+    final date = DateTime.tryParse(value);
+    if (date == null) return '';
+    return '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+  }
+
+  String _formatDay(String value) {
+    final date = DateTime.tryParse(value);
+    if (date == null) return '';
+    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return names[date.weekday - 1];
+  }
+
+  String _formatWork(String startValue, String endValue) {
+    final start = DateTime.tryParse(startValue);
+    final end = DateTime.tryParse(endValue);
+    if (start == null || end == null || end.isBefore(start)) return '';
+    final duration = end.difference(start);
+    return '${duration.inHours.toString().padLeft(2, '0')}:${(duration.inMinutes % 60).toString().padLeft(2, '0')}';
+  }
+
+  String _formatRest(String startValue, String previousEndValue) {
+    final start = DateTime.tryParse(startValue);
+    final previousEnd = DateTime.tryParse(previousEndValue);
+    if (start == null || previousEnd == null || start.isBefore(previousEnd)) {
+      return '';
+    }
+    final duration = start.difference(previousEnd);
+    return '${duration.inHours.toString().padLeft(2, '0')}:${(duration.inMinutes % 60).toString().padLeft(2, '0')}';
+  }
+
+  String _formatBalance(String restValue) {
+    final parts = restValue.split(':');
+    if (parts.length != 2) return '';
+    final restMinutes =
+        (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
+    if (restMinutes <= 24 * 60) return '';
+
+    final balanceMinutes = restMinutes - 45 * 60;
+    final sign = balanceMinutes < 0 ? '-' : '+';
+    final absoluteMinutes = balanceMinutes.abs();
+    return '$sign${(absoluteMinutes ~/ 60).toString().padLeft(2, '0')}:${(absoluteMinutes % 60).toString().padLeft(2, '0')}';
+  }
+
+  String _formatKilometers(String currentValue, String previousValue) {
+    final current = double.tryParse(currentValue.replaceAll(',', '.'));
+    final previous = double.tryParse(previousValue.replaceAll(',', '.'));
+    if (current == null || previous == null || current < previous) return '';
+
+    final distance = current - previous;
+    if (distance == distance.roundToDouble()) {
+      return distance.toInt().toString();
+    }
+    return distance.toStringAsFixed(1);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          child: Container(
+            width: constraints.maxWidth,
+            margin: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEFEFEF),
+              border: Border.all(color: Colors.black, width: 2),
+            ),
+            child: Table(
+              border: TableBorder.all(color: Colors.black, width: 1),
+              columnWidths: const {
+                0: FlexColumnWidth(1.5),
+                1: FlexColumnWidth(0.85),
+                2: FlexColumnWidth(0.9),
+                3: FlexColumnWidth(0.9),
+                4: FlexColumnWidth(0.8),
+                5: FlexColumnWidth(0.8),
+                6: FlexColumnWidth(0.8),
+                7: FlexColumnWidth(1.2),
+                8: FlexColumnWidth(0.9),
+              },
+              children: [
+                TableRow(
+                  decoration: const BoxDecoration(color: Color(0xFF73C88B)),
+                  children: const [
+                    _TableHeaderCell('Date'),
+                    _TableHeaderCell('DayWeek'),
+                    _TableHeaderCell('StartTime'),
+                    _TableHeaderCell('EndTime'),
+                    _TableHeaderCell('WorkingTime'),
+                    _TableHeaderCell('RestTime'),
+                    _TableHeaderCell('Balance'),
+                    _TableHeaderCell('Odometer'),
+                    _TableHeaderCell('Kilometer'),
+                  ],
+                ),
+                ...rows.asMap().entries.map((entry) {
+                  final index = entry.key;
+                  final row = entry.value;
+                  final start = row['start_at']?.toString() ?? '';
+                  final end = row['end_at']?.toString() ?? '';
+                  final mileage = row['mileage']?.toString() ?? '';
+                  final previousMileage = index == 0
+                      ? ''
+                      : rows[index - 1]['mileage']?.toString() ?? '';
+                  final previousEnd = index == 0
+                      ? ''
+                      : rows[index - 1]['end_at']?.toString() ?? '';
+                  final rest = _formatRest(start, previousEnd);
+                  final balance = _formatBalance(rest);
+                  return TableRow(
+                    decoration: BoxDecoration(
+                      color:
+                          index.isEven ? Colors.white : const Color(0xFFF0F0F0),
+                    ),
+                    children: [
+                      _TableCell(_formatDate(start)),
+                      _TableCell(_formatDay(start)),
+                      _TableCell(_formatTime(start)),
+                      _TableCell(_formatTime(end)),
+                      _TableCell(_formatWork(start, end)),
+                      _TableCell(rest),
+                      _TableCell(
+                        balance,
+                        textColor: balance.startsWith('+')
+                            ? Colors.green.shade700
+                            : balance.startsWith('-')
+                                ? Colors.red.shade700
+                                : Colors.black,
+                      ),
+                      _TableCell(mileage),
+                      _TableCell(
+                        _formatKilometers(mileage, previousMileage),
+                      ),
+                    ],
+                  );
+                }),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _TableHeaderCell extends StatelessWidget {
+  const _TableHeaderCell(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          text,
+          maxLines: 1,
+          style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            color: Colors.black,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TableCell extends StatelessWidget {
+  const _TableCell(this.text, {this.textColor = Colors.black});
+
+  final String text;
+  final Color textColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 42,
+      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 1),
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          text,
+          maxLines: 1,
+          style: TextStyle(
+            fontSize: 11,
+            color: textColor,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ShiftDatabase {
+  static final ShiftDatabase instance = ShiftDatabase._();
+  static const _storageChannel = MethodChannel('tachocontrol/storage');
+
+  ShiftDatabase._();
+
+  static Database? _database;
+
+  static Future<Database> get database async {
+    if (_database != null) {
+      return _database!;
+    }
+
+    final dbPath = await getDatabasesPath();
+    final path = p.join(dbPath, 'tachocontrol.db');
+
+    _database = await openDatabase(
+      path,
+      version: 2,
+      onCreate: (db, version) async {
+        await db.execute('''
+          CREATE TABLE shifts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_at TEXT,
+            end_at TEXT,
+            mileage TEXT,
+            created_at TEXT
+          )
+        ''');
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute(
+            'CREATE INDEX IF NOT EXISTS idx_shifts_created_at '
+            'ON shifts(created_at)',
+          );
+        }
+      },
+    );
+
+    await _removeOlderThan112Days(_database!);
+    return _database!;
+  }
+
+  static Future<void> _removeOlderThan112Days(Database db) async {
+    final cutoff =
+        DateTime.now().subtract(const Duration(days: 112)).toIso8601String();
+    await db.delete(
+      'shifts',
+      where: 'created_at < ?',
+      whereArgs: [cutoff],
+    );
+  }
+
+  static Future<List<Map<String, Object?>>> getLast56Days() async {
+    final db = await database;
+    final cutoff =
+        DateTime.now().subtract(const Duration(days: 56)).toIso8601String();
+    return db.query(
+      'shifts',
+      where: 'created_at >= ?',
+      whereArgs: [cutoff],
+      orderBy: 'created_at ASC',
+    );
+  }
+
+  static Future<int> restoreCsv(Uint8List bytes) async {
+    final text =
+        utf8.decode(bytes, allowMalformed: true).replaceFirst('\uFEFF', '');
+    final rows = const CsvToListConverter(fieldDelimiter: ';').convert(text);
+    if (rows.length < 2) return 0;
+
+    final db = await database;
+    final existing = await db.query('shifts');
+    final existingKeys = existing
+        .map(
+          (row) => '${row['start_at']}|${row['end_at']}|${row['mileage']}',
+        )
+        .toSet();
+    var imported = 0;
+
+    for (final row in rows.skip(1)) {
+      if (row.length < 4) continue;
+      final date = row[0].toString().trim();
+      final startTime = row[2].toString().trim();
+      if (date.isEmpty || startTime.isEmpty) continue;
+
+      final start = _parseCsvDateTime(date, startTime);
+      if (start == null) continue;
+      final end = row[3].toString().trim().isEmpty
+          ? null
+          : _parseCsvDateTime(date, row[3].toString().trim());
+      final mileage = row.length > 7 ? row[7].toString().trim() : '';
+      final startAt = start.toIso8601String();
+      final endAt = end?.toIso8601String();
+      final key = '$startAt|$endAt|$mileage';
+      if (!existingKeys.add(key)) continue;
+
+      await db.insert('shifts', {
+        'start_at': startAt,
+        'end_at': endAt,
+        'mileage': mileage,
+        'created_at': startAt,
+      });
+      imported++;
+    }
+
+    await _removeOlderThan112Days(db);
+    if (imported > 0) await createCsvBackup();
+    return imported;
+  }
+
+  static DateTime? _parseCsvDateTime(String dateValue, String timeValue) {
+    final iso = DateTime.tryParse('$dateValue $timeValue:00');
+    if (iso != null) return iso;
+
+    final parts = dateValue.split('-');
+    if (parts.length != 3) return null;
+    const months = {
+      'Jan': 1,
+      'Feb': 2,
+      'Mar': 3,
+      'Apr': 4,
+      'May': 5,
+      'Jun': 6,
+      'Jul': 7,
+      'Aug': 8,
+      'Sep': 9,
+      'Oct': 10,
+      'Nov': 11,
+      'Dec': 12,
+    };
+    final day = int.tryParse(parts[0]);
+    final month = months[parts[1]];
+    final year = int.tryParse(parts[2]);
+    final timeParts = timeValue.split(':');
+    final hour = int.tryParse(timeParts.first);
+    final minute = timeParts.length > 1 ? int.tryParse(timeParts[1]) : null;
+    if (day == null ||
+        month == null ||
+        year == null ||
+        hour == null ||
+        minute == null) {
+      return null;
+    }
+    return DateTime(year, month, day, hour, minute);
+  }
+
+  static Future<File> _createCsvFile(String prefix) async {
+    final db = await database;
+    final rows = await db.query('shifts', orderBy: 'created_at ASC');
+    final documentsDirectory = await getApplicationDocumentsDirectory();
+    final backupDirectory = Directory(
+      p.join(documentsDirectory.path, 'tachocontrol_backups'),
+    );
+    await backupDirectory.create(recursive: true);
+
+    final date = DateTime.now();
+    final dateName = '${date.year}-${date.month.toString().padLeft(2, '0')}-'
+        '${date.day.toString().padLeft(2, '0')}_'
+        '${date.hour.toString().padLeft(2, '0')}-'
+        '${date.minute.toString().padLeft(2, '0')}-'
+        '${date.second.toString().padLeft(2, '0')}';
+    final file = File(
+      p.join(backupDirectory.path, '${prefix}_$dateName.csv'),
+    );
+
+    final lines = _buildCsvLines(rows);
+    final csvContent = '\uFEFF${lines.join('\n')}';
+    await file.writeAsString(csvContent);
+    await _saveToPublicDownloads(
+      fileName: p.basename(file.path),
+      content: Uint8List.fromList(utf8.encode(csvContent)),
+    );
+
+    final backups = backupDirectory
+        .listSync()
+        .whereType<File>()
+        .where((file) =>
+            p.basename(file.path).startsWith('tachocontrol_backup_') &&
+            p.extension(file.path).toLowerCase() == '.csv')
+        .toList()
+      ..sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
+
+    for (final oldBackup in backups.skip(3)) {
+      await oldBackup.delete();
+    }
+
+    return file;
+  }
+
+  static Future<void> _saveToPublicDownloads({
+    required String fileName,
+    required Uint8List content,
+  }) async {
+    if (!Platform.isAndroid) return;
+
+    await _storageChannel.invokeMethod<void>('saveBackupToDownloads', {
+      'fileName': fileName,
+      'bytes': content,
+    });
+  }
+
+  static Future<void> createCsvBackup() async {
+    await _createCsvFile('tachocontrol_backup');
+  }
+
+  static Future<String> exportCsv() async {
+    final file = await _createCsvFile('tachocontrol_export');
+    await Share.shareXFiles(
+      [XFile(file.path)],
+      text: 'TachoControl export',
+    );
+    return 'CSV-файл подготовлен для Excel';
+  }
+
+  static List<String> _buildCsvLines(List<Map<String, Object?>> rows) {
+    final lines = <String>[
+      'Date;DayWeek;StartTime;EndTime;WorkingTime;RestTime;Balance;Odometer;Kilometrage',
+    ];
+
+    for (var index = 0; index < rows.length; index++) {
+      final row = rows[index];
+      final start = row['start_at']?.toString() ?? '';
+      final end = row['end_at']?.toString() ?? '';
+      final previousEnd =
+          index == 0 ? '' : rows[index - 1]['end_at']?.toString() ?? '';
+      final mileage = row['mileage']?.toString() ?? '';
+      final previousMileage =
+          index == 0 ? '' : rows[index - 1]['mileage']?.toString() ?? '';
+      final workingTime = _duration(start, end);
+      final restTime = _duration(previousEnd, start);
+      final balance = _balance(restTime);
+      final kilometers = _kilometers(mileage, previousMileage);
+
+      lines.add([
+        start.isEmpty ? '' : start.substring(0, 10),
+        start.isEmpty ? '' : _weekday(start),
+        _time(start),
+        _time(end),
+        workingTime,
+        restTime,
+        balance,
+        mileage,
+        kilometers,
+      ].map(_csvValue).join(';'));
+    }
+
+    return lines;
+  }
+
+  static String _duration(String fromValue, String toValue) {
+    final from = DateTime.tryParse(fromValue);
+    final to = DateTime.tryParse(toValue);
+    if (from == null || to == null || to.isBefore(from)) return '';
+    final minutes = to.difference(from).inMinutes;
+    return '${(minutes ~/ 60).toString().padLeft(2, '0')}:${(minutes % 60).toString().padLeft(2, '0')}';
+  }
+
+  static String _balance(String restValue) {
+    final parts = restValue.split(':');
+    if (parts.length != 2) return '';
+    final restMinutes = int.parse(parts[0]) * 60 + int.parse(parts[1]);
+    if (restMinutes <= 24 * 60) return '';
+    final balanceMinutes = restMinutes - 45 * 60;
+    final sign = balanceMinutes < 0 ? '-' : '+';
+    final absoluteMinutes = balanceMinutes.abs();
+    return '$sign${(absoluteMinutes ~/ 60).toString().padLeft(2, '0')}:${(absoluteMinutes % 60).toString().padLeft(2, '0')}';
+  }
+
+  static String _kilometers(String currentValue, String previousValue) {
+    final current = double.tryParse(currentValue.replaceAll(',', '.'));
+    final previous = double.tryParse(previousValue.replaceAll(',', '.'));
+    if (current == null || previous == null || current < previous) return '';
+    final distance = current - previous;
+    return distance == distance.roundToDouble()
+        ? distance.toInt().toString()
+        : distance.toStringAsFixed(1);
+  }
+
+  static String _csvValue(String value) {
+    return '"${value.replaceAll('"', '""')}"';
+  }
+
+  static String _time(String value) {
+    if (value.length < 16) return '';
+    return value.substring(11, 16);
+  }
+
+  static String _weekday(String value) {
+    final date = DateTime.tryParse(value);
+    if (date == null) return '';
+    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return names[date.weekday - 1];
+  }
+}
+
+class MyHomePage extends StatefulWidget {
+  const MyHomePage({super.key});
+
+  @override
+  State<MyHomePage> createState() => _MyHomePageState();
+}
+
+class _MyHomePageState extends State<MyHomePage> {
+  DateTime? _startAt;
+  DateTime? _endAt;
+  final TextEditingController _mileageController = TextEditingController();
+  bool _isMileageEditing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    ShiftDatabase.database;
+  }
+
+  String _formatDateTime(DateTime value) {
+    final day = value.day.toString().padLeft(2, '0');
+    final month = value.month.toString().padLeft(2, '0');
+    final year = value.year;
+    final hour = value.hour.toString().padLeft(2, '0');
+    final minute = value.minute.toString().padLeft(2, '0');
+
+    return '$day.$month.$year $hour:$minute';
+  }
+
+  Future<void> _setStart() async {
+    setState(() {
+      _startAt = DateTime.now();
+    });
+  }
+
+  Future<void> _setEnd() async {
+    setState(() {
+      _endAt = DateTime.now();
+    });
+  }
+
+  Future<void> _sendToDatabase() async {
+    try {
+      final db = await ShiftDatabase.database;
+
+      await db.insert(
+        'shifts',
+        {
+          'start_at': _startAt?.toIso8601String(),
+          'end_at': _endAt?.toIso8601String(),
+          'mileage': _mileageController.text.trim(),
+          'created_at': DateTime.now().toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _startAt = null;
+        _endAt = null;
+        _mileageController.clear();
+        _isMileageEditing = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Данные отправлены в БД')),
+      );
+
+      try {
+        await ShiftDatabase.createCsvBackup();
+      } catch (_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Данные сохранены, но резервная копия не создана'),
+          ),
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка сохранения: $error')),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _mileageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Center(
+          child: SizedBox(
+            width: 900,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _ActionButton(
+                          label: 'START',
+                          color: Colors.green,
+                          onPressed: _setStart,
+                        ),
+                      ),
+                      const SizedBox(width: 20),
+                      Expanded(
+                        child: _DateBox(dateTime: _startAt),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _ActionButton(
+                          label: 'END',
+                          color: Colors.red,
+                          onPressed: _setEnd,
+                        ),
+                      ),
+                      const SizedBox(width: 20),
+                      Expanded(
+                        child: _DateBox(dateTime: _endAt),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  Center(
+                    child: SizedBox(
+                      width: 420,
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _isMileageEditing = true;
+                          });
+                        },
+                        child: _isMileageEditing
+                            ? _MileageInput(controller: _mileageController)
+                            : Container(
+                                height: 90,
+                                color: const Color(0xFFEFEFEF),
+                                alignment: Alignment.center,
+                                child: const Text(
+                                  'KM',
+                                  style: TextStyle(
+                                    fontSize: 34,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                              ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _ActionButton(
+                          label: 'SEND',
+                          color: Colors.yellow,
+                          onPressed: _sendToDatabase,
+                          height: 120,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  SizedBox(
+                    height: 90,
+                    child: _ActionButton(
+                      label: 'DAYS',
+                      color: Colors.blue,
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const ShiftHistoryPage(),
+                          ),
+                        );
+                      },
+                      height: 90,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ActionButton extends StatelessWidget {
+  const _ActionButton({
+    required this.label,
+    required this.color,
+    required this.onPressed,
+    this.height = 120,
+  });
+
+  final String label;
+  final Color color;
+  final VoidCallback onPressed;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: height,
+      child: ElevatedButton(
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: color,
+          foregroundColor: Colors.black,
+          elevation: 0,
+          padding: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.zero,
+          ),
+        ),
+        child: Center(
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 42,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DateBox extends StatelessWidget {
+  const _DateBox({required this.dateTime});
+
+  final DateTime? dateTime;
+
+  String _formatDateTime(DateTime value) {
+    final day = value.day.toString().padLeft(2, '0');
+    final month = value.month.toString().padLeft(2, '0');
+    final year = value.year;
+    final hour = value.hour.toString().padLeft(2, '0');
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '$day.$month.$year $hour:$minute';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 120,
+      color: const Color(0xFFF1F1F1),
+      alignment: Alignment.center,
+      child: Text(
+        dateTime == null ? '' : _formatDateTime(dateTime!),
+        style: const TextStyle(
+          fontSize: 30,
+          fontWeight: FontWeight.w500,
+          color: Colors.black,
+        ),
+      ),
+    );
+  }
+}
+
+class _MileageInput extends StatelessWidget {
+  const _MileageInput({required this.controller});
+
+  final TextEditingController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 90,
+      color: const Color(0xFFEFEFEF),
+      alignment: Alignment.center,
+      child: TextField(
+        controller: controller,
+        keyboardType: TextInputType.number,
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          fontSize: 34,
+          fontWeight: FontWeight.w500,
+          color: Colors.black,
+        ),
+        decoration: const InputDecoration(
+          border: InputBorder.none,
+          contentPadding: EdgeInsets.zero,
+        ),
+      ),
+    );
+  }
+}
+
+class _DataRow extends StatelessWidget {
+  const _DataRow({
+    required this.label,
+    this.value,
+    this.valueWidget,
+    this.onTap,
+  });
+
+  final String label;
+  final String? value;
+  final Widget? valueWidget;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final content = valueWidget ??
+        Text(
+          value ?? '',
+          style: const TextStyle(
+            fontSize: 22,
+            color: Colors.black,
+          ),
+        );
+
+    return Row(
+      children: [
+        Expanded(
+          flex: 2,
+          child: Container(
+            height: 60,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            alignment: Alignment.centerLeft,
+            decoration: const BoxDecoration(
+              border: Border(
+                right: BorderSide(color: Colors.black54, width: 1.2),
+              ),
+            ),
+            child: onTap == null
+                ? Text(
+                    label,
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.black,
+                    ),
+                  )
+                : TextButton(
+                    onPressed: onTap,
+                    style: TextButton.styleFrom(
+                      padding: EdgeInsets.zero,
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        label,
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.black,
+                        ),
+                      ),
+                    ),
+                  ),
+          ),
+        ),
+        Expanded(
+          flex: 3,
+          child: Container(
+            height: 60,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            alignment: Alignment.centerLeft,
+            child: valueWidget ?? content,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.label,
+    required this.text,
+  });
+
+  final String label;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          flex: 2,
+          child: Container(
+            padding: const EdgeInsets.all(10),
+            alignment: Alignment.topLeft,
+            decoration: const BoxDecoration(
+              border: Border(
+                right: BorderSide(color: Colors.black54, width: 1.2),
+                bottom: BorderSide(color: Colors.black54, width: 1.2),
+              ),
+            ),
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w500,
+                color: Colors.black,
+              ),
+            ),
+          ),
+        ),
+        Expanded(
+          flex: 5,
+          child: Container(
+            padding: const EdgeInsets.all(10),
+            alignment: Alignment.topLeft,
+            decoration: const BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: Colors.black54, width: 1.2),
+              ),
+            ),
+            child: Text(
+              text,
+              style: const TextStyle(
+                fontSize: 18,
+                color: Colors.black,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
