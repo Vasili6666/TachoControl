@@ -2,6 +2,7 @@ package com.example.tachocontrol
 
 import android.content.ContentUris
 import android.content.ContentValues
+import android.content.Intent
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -11,12 +12,30 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
 	private val channelName = "tachocontrol/storage"
+	private val pickCsvRequestCode = 4101
+	private var pendingCsvResult: MethodChannel.Result? = null
 
 	override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
 		super.configureFlutterEngine(flutterEngine)
 
 		MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
 			.setMethodCallHandler { call, result ->
+				if (call.method == "pickCsvFile") {
+					if (pendingCsvResult != null) {
+						result.error("PICKER_BUSY", "File picker is already open", null)
+						return@setMethodCallHandler
+					}
+
+					pendingCsvResult = result
+					val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+						type = "text/csv"
+						addCategory(Intent.CATEGORY_OPENABLE)
+						putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("text/csv", "text/*"))
+					}
+					startActivityForResult(intent, pickCsvRequestCode)
+					return@setMethodCallHandler
+				}
+
 				if (call.method != "saveBackupToDownloads") {
 					result.notImplemented()
 					return@setMethodCallHandler
@@ -68,6 +87,29 @@ class MainActivity : FlutterActivity() {
 					result.error("BACKUP_FAILED", error.message, null)
 				}
 			}
+	}
+
+	override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+		if (requestCode == pickCsvRequestCode) {
+			val result = pendingCsvResult
+			pendingCsvResult = null
+			if (result == null) return
+
+			if (resultCode != RESULT_OK || data?.data == null) {
+				result.success(null)
+				return
+			}
+
+			try {
+				val bytes = contentResolver.openInputStream(data.data!!)?.use { it.readBytes() }
+				result.success(bytes)
+			} catch (error: Exception) {
+				result.error("READ_FAILED", error.message, null)
+			}
+			return
+		}
+
+		super.onActivityResult(requestCode, resultCode, data)
 	}
 
 	private fun removeOldBackups() {

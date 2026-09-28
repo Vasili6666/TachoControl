@@ -3,7 +3,6 @@ import 'dart:typed_data';
 import 'dart:convert';
 
 import 'package:csv/csv.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
@@ -49,19 +48,11 @@ class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
   }
 
   Future<void> _restoreCsv() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['csv'],
-      withData: true,
-    );
-    if (!mounted || result == null || result.files.single.bytes == null) {
-      return;
-    }
+    final bytes = await ShiftDatabase.pickCsvFile();
+    if (!mounted || bytes == null) return;
 
     try {
-      final count = await ShiftDatabase.restoreCsv(
-        result.files.single.bytes!,
-      );
+      final count = await ShiftDatabase.restoreCsv(bytes);
       if (!mounted) return;
       setState(() {
         _rowsFuture = ShiftDatabase.getLast56Days();
@@ -403,6 +394,14 @@ class ShiftDatabase {
   ShiftDatabase._();
 
   static Database? _database;
+
+  static Future<Uint8List?> pickCsvFile() async {
+    if (!Platform.isAndroid) return null;
+    final bytes =
+        await _storageChannel.invokeMethod<List<dynamic>>('pickCsvFile');
+    if (bytes == null) return null;
+    return Uint8List.fromList(bytes.cast<int>());
+  }
 
   static Future<Database> get database async {
     if (_database != null) {
