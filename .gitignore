@@ -44,3 +44,4 @@ app.*.map.json
 
 # Local Android SDK paths
 **/local.properties
+**/.kotlin/
