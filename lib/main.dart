@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:convert';
 
 import 'package:csv/csv.dart';
@@ -22,6 +21,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'TachoControl',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
         useMaterial3: true,
@@ -95,6 +95,38 @@ class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
     });
   }
 
+  Future<void> _editComment(int id, String currentComment) async {
+    final comment = await showDialog<String>(
+      context: context,
+      builder: (_) => _CommentEditorDialog(initialComment: currentComment),
+    );
+    if (comment == null) return;
+
+    try {
+      await ShiftDatabase.updateComment(id, comment);
+      if (!mounted) return;
+      setState(() {
+        _rowsFuture = ShiftDatabase.getLast56Days();
+      });
+      try {
+        await ShiftDatabase.createCsvBackup();
+      } catch (_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content:
+                Text('Комментарий сохранён, но резервная копия не создана'),
+          ),
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка сохранения комментария: $error')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -141,7 +173,11 @@ class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
             }
 
             final rows = snapshot.data!;
-            return _HistoryTable(rows: rows, onDelete: _deleteRow);
+            return _HistoryTable(
+              rows: rows,
+              onDelete: _deleteRow,
+              onEditComment: _editComment,
+            );
           },
         ),
       ),
@@ -150,10 +186,15 @@ class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
 }
 
 class _HistoryTable extends StatelessWidget {
-  const _HistoryTable({required this.rows, required this.onDelete});
+  const _HistoryTable({
+    required this.rows,
+    required this.onDelete,
+    required this.onEditComment,
+  });
 
   final List<Map<String, Object?>> rows;
   final Future<void> Function(int id) onDelete;
+  final Future<void> Function(int id, String comment) onEditComment;
 
   String _formatDate(String value) {
     final date = DateTime.tryParse(value);
@@ -222,89 +263,102 @@ class _HistoryTable extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         return SingleChildScrollView(
-          child: Container(
-            width: constraints.maxWidth,
-            margin: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: const Color(0xFFEFEFEF),
-              border: Border.all(color: Colors.black, width: 2),
-            ),
-            child: Table(
-              border: TableBorder.all(color: Colors.black, width: 1),
-              columnWidths: const {
-                0: FlexColumnWidth(1.5),
-                1: FlexColumnWidth(0.85),
-                2: FlexColumnWidth(0.9),
-                3: FlexColumnWidth(0.9),
-                4: FlexColumnWidth(0.8),
-                5: FlexColumnWidth(0.8),
-                6: FlexColumnWidth(0.8),
-                7: FlexColumnWidth(1.2),
-                8: FlexColumnWidth(0.9),
-                9: FlexColumnWidth(0.6),
-              },
-              children: [
-                const TableRow(
-                  decoration: BoxDecoration(color: Color(0xFF73C88B)),
-                  children: [
-                    _TableHeaderCell('Date'),
-                    _TableHeaderCell('DayWeek'),
-                    _TableHeaderCell('StartTime'),
-                    _TableHeaderCell('EndTime'),
-                    _TableHeaderCell('WorkingTime'),
-                    _TableHeaderCell('RestTime'),
-                    _TableHeaderCell('Balance'),
-                    _TableHeaderCell('Odometer'),
-                    _TableHeaderCell('Kilometer'),
-                    _TableHeaderCell(''),
-                  ],
-                ),
-                ...rows.asMap().entries.map((entry) {
-                  final index = entry.key;
-                  final row = entry.value;
-                  final start = row['start_at']?.toString() ?? '';
-                  final end = row['end_at']?.toString() ?? '';
-                  final mileage = row['mileage']?.toString() ?? '';
-                  final previousMileage = index == 0
-                      ? ''
-                      : rows[index - 1]['mileage']?.toString() ?? '';
-                  final previousEnd = index == 0
-                      ? ''
-                      : rows[index - 1]['end_at']?.toString() ?? '';
-                  final rest = _formatRest(start, previousEnd);
-                  final balance = _formatBalance(rest);
-                  final id = int.tryParse(row['id']?.toString() ?? '');
-                  return TableRow(
-                    decoration: BoxDecoration(
-                      color:
-                          index.isEven ? Colors.white : const Color(0xFFF0F0F0),
-                    ),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Container(
+              width: constraints.maxWidth < 1100 ? 1100 : constraints.maxWidth,
+              margin: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEFEFEF),
+                border: Border.all(color: Colors.black, width: 2),
+              ),
+              child: Table(
+                border: TableBorder.all(color: Colors.black, width: 1),
+                columnWidths: const {
+                  0: FlexColumnWidth(1.5),
+                  1: FlexColumnWidth(0.85),
+                  2: FlexColumnWidth(0.9),
+                  3: FlexColumnWidth(0.9),
+                  4: FlexColumnWidth(0.8),
+                  5: FlexColumnWidth(0.8),
+                  6: FlexColumnWidth(0.8),
+                  7: FlexColumnWidth(1.2),
+                  8: FlexColumnWidth(0.9),
+                  9: FlexColumnWidth(2.2),
+                  10: FlexColumnWidth(0.6),
+                },
+                children: [
+                  const TableRow(
+                    decoration: BoxDecoration(color: Color(0xFF73C88B)),
                     children: [
-                      _TableCell(_formatDate(start)),
-                      _TableCell(_formatDay(start)),
-                      _TableCell(_formatTime(start)),
-                      _TableCell(_formatTime(end)),
-                      _TableCell(_formatWork(start, end)),
-                      _TableCell(rest),
-                      _TableCell(
-                        balance,
-                        textColor: balance.startsWith('+')
-                            ? Colors.green.shade700
-                            : balance.startsWith('-')
-                                ? Colors.red.shade700
-                                : Colors.black,
-                      ),
-                      _TableCell(mileage),
-                      _TableCell(
-                        _formatKilometers(mileage, previousMileage),
-                      ),
-                      _DeleteCell(
-                        onPressed: id == null ? null : () => onDelete(id),
-                      ),
+                      _TableHeaderCell('Date'),
+                      _TableHeaderCell('DayWeek'),
+                      _TableHeaderCell('StartTime'),
+                      _TableHeaderCell('EndTime'),
+                      _TableHeaderCell('WorkingTime'),
+                      _TableHeaderCell('RestTime'),
+                      _TableHeaderCell('Balance'),
+                      _TableHeaderCell('Odometer'),
+                      _TableHeaderCell('Kilometer'),
+                      _TableHeaderCell('Comments'),
+                      _TableHeaderCell(''),
                     ],
-                  );
-                }),
-              ],
+                  ),
+                  ...rows.asMap().entries.map((entry) {
+                    final index = entry.key;
+                    final row = entry.value;
+                    final start = row['start_at']?.toString() ?? '';
+                    final end = row['end_at']?.toString() ?? '';
+                    final comment = row['comments']?.toString() ?? '';
+                    final mileage = row['mileage']?.toString() ?? '';
+                    final previousMileage = index == 0
+                        ? ''
+                        : rows[index - 1]['mileage']?.toString() ?? '';
+                    final previousEnd = index == 0
+                        ? ''
+                        : rows[index - 1]['end_at']?.toString() ?? '';
+                    final rest = _formatRest(start, previousEnd);
+                    final balance = _formatBalance(rest);
+                    final id = int.tryParse(row['id']?.toString() ?? '');
+                    return TableRow(
+                      decoration: BoxDecoration(
+                        color: index.isEven
+                            ? Colors.white
+                            : const Color(0xFFF0F0F0),
+                      ),
+                      children: [
+                        _TableCell(_formatDate(start)),
+                        _TableCell(_formatDay(start)),
+                        _TableCell(_formatTime(start)),
+                        _TableCell(_formatTime(end)),
+                        _TableCell(_formatWork(start, end)),
+                        _TableCell(rest),
+                        _TableCell(
+                          balance,
+                          textColor: balance.startsWith('+')
+                              ? Colors.green.shade700
+                              : balance.startsWith('-')
+                                  ? Colors.red.shade700
+                                  : Colors.black,
+                        ),
+                        _TableCell(mileage),
+                        _TableCell(
+                          _formatKilometers(mileage, previousMileage),
+                        ),
+                        _CommentCell(
+                          comment: comment,
+                          onTap: id == null
+                              ? null
+                              : () => onEditComment(id, comment),
+                        ),
+                        _DeleteCell(
+                          onPressed: id == null ? null : () => onDelete(id),
+                        ),
+                      ],
+                    );
+                  }),
+                ],
+              ),
             ),
           ),
         );
@@ -387,6 +441,89 @@ class _DeleteCell extends StatelessWidget {
   }
 }
 
+class _CommentCell extends StatelessWidget {
+  const _CommentCell({required this.comment, required this.onTap});
+
+  final String comment;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Редактировать комментарий',
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          height: 56,
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: comment.isEmpty
+              ? const Icon(Icons.add_comment_outlined, size: 18)
+              : Text(
+                  comment,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: Colors.black),
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CommentEditorDialog extends StatefulWidget {
+  const _CommentEditorDialog({required this.initialComment});
+
+  final String initialComment;
+
+  @override
+  State<_CommentEditorDialog> createState() => _CommentEditorDialogState();
+}
+
+class _CommentEditorDialogState extends State<_CommentEditorDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialComment);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Comments'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        minLines: 3,
+        maxLines: 6,
+        textCapitalization: TextCapitalization.sentences,
+        decoration: const InputDecoration(
+          hintText: 'Заметка об этом дне или нарушении',
+          border: OutlineInputBorder(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Отмена'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _controller.text.trim()),
+          child: const Text('Сохранить'),
+        ),
+      ],
+    );
+  }
+}
+
 class ShiftDatabase {
   static final ShiftDatabase instance = ShiftDatabase._();
   static const _storageChannel = MethodChannel('tachocontrol/storage');
@@ -413,7 +550,7 @@ class ShiftDatabase {
 
     _database = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE shifts (
@@ -421,6 +558,7 @@ class ShiftDatabase {
             start_at TEXT,
             end_at TEXT,
             mileage TEXT,
+            comments TEXT,
             created_at TEXT
           )
         ''');
@@ -431,6 +569,9 @@ class ShiftDatabase {
             'CREATE INDEX IF NOT EXISTS idx_shifts_created_at '
             'ON shifts(created_at)',
           );
+        }
+        if (oldVersion < 3) {
+          await db.execute('ALTER TABLE shifts ADD COLUMN comments TEXT');
         }
       },
     );
@@ -470,6 +611,16 @@ class ShiftDatabase {
     );
   }
 
+  static Future<void> updateComment(int id, String comment) async {
+    final db = await database;
+    await db.update(
+      'shifts',
+      {'comments': comment},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   static Future<int> restoreCsv(Uint8List bytes) async {
     final text =
         utf8.decode(bytes, allowMalformed: true).replaceFirst('\uFEFF', '');
@@ -497,6 +648,7 @@ class ShiftDatabase {
           ? null
           : _parseCsvDateTime(date, row[3].toString().trim());
       final mileage = row.length > 7 ? row[7].toString().trim() : '';
+      final comment = row.length > 9 ? row[9].toString().trim() : '';
       final startAt = start.toIso8601String();
       final endAt = end?.toIso8601String();
       final key = '$startAt|$endAt|$mileage';
@@ -506,6 +658,7 @@ class ShiftDatabase {
         'start_at': startAt,
         'end_at': endAt,
         'mileage': mileage,
+        'comments': comment,
         'created_at': startAt,
       });
       imported++;
@@ -622,7 +775,7 @@ class ShiftDatabase {
 
   static List<String> _buildCsvLines(List<Map<String, Object?>> rows) {
     final lines = <String>[
-      'Date;DayWeek;StartTime;EndTime;WorkingTime;RestTime;Balance;Odometer;Kilometrage',
+      'Date;DayWeek;StartTime;EndTime;WorkingTime;RestTime;Balance;Odometer;Kilometrage;Comments',
     ];
 
     for (var index = 0; index < rows.length; index++) {
@@ -632,6 +785,7 @@ class ShiftDatabase {
       final previousEnd =
           index == 0 ? '' : rows[index - 1]['end_at']?.toString() ?? '';
       final mileage = row['mileage']?.toString() ?? '';
+      final comment = row['comments']?.toString() ?? '';
       final previousMileage =
           index == 0 ? '' : rows[index - 1]['mileage']?.toString() ?? '';
       final workingTime = _duration(start, end);
@@ -649,6 +803,7 @@ class ShiftDatabase {
         balance,
         mileage,
         kilometers,
+        comment,
       ].map(_csvValue).join(';'));
     }
 
@@ -720,6 +875,55 @@ class _MyHomePageState extends State<MyHomePage> {
     ShiftDatabase.database;
   }
 
+  static DateTime? _tryParseManualDateTime(String raw) {
+    final normalized = raw.trim();
+    if (normalized.isEmpty) return null;
+
+    final dashMatch = RegExp(
+      r'^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})$',
+    ).firstMatch(normalized);
+    if (dashMatch != null) {
+      final day = int.tryParse(dashMatch.group(1)!);
+      final month = int.tryParse(dashMatch.group(2)!);
+      final year = int.tryParse(dashMatch.group(3)!);
+      final hour = int.tryParse(dashMatch.group(4)!);
+      final minute = int.tryParse(dashMatch.group(5)!);
+      if (day == null ||
+          month == null ||
+          year == null ||
+          hour == null ||
+          minute == null) {
+        return null;
+      }
+      return DateTime(year, month, day, hour, minute);
+    }
+
+    final isoCandidate = normalized.replaceAll('.', '-');
+    final parsed = DateTime.tryParse(isoCandidate);
+    if (parsed != null) return parsed;
+
+    final slashMatch = RegExp(
+      r'^(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})$',
+    ).firstMatch(normalized);
+    if (slashMatch != null) {
+      final day = int.tryParse(slashMatch.group(1)!);
+      final month = int.tryParse(slashMatch.group(2)!);
+      final year = int.tryParse(slashMatch.group(3)!);
+      final hour = int.tryParse(slashMatch.group(4)!);
+      final minute = int.tryParse(slashMatch.group(5)!);
+      if (day == null ||
+          month == null ||
+          year == null ||
+          hour == null ||
+          minute == null) {
+        return null;
+      }
+      return DateTime(year, month, day, hour, minute);
+    }
+
+    return null;
+  }
+
   String _formatDateTime(DateTime value) {
     final day = value.day.toString().padLeft(2, '0');
     final month = value.month.toString().padLeft(2, '0');
@@ -739,6 +943,63 @@ class _MyHomePageState extends State<MyHomePage> {
   Future<void> _setEnd() async {
     setState(() {
       _endAt = DateTime.now();
+    });
+  }
+
+  Future<void> _editDateTime({required bool isStart}) async {
+    final current = isStart ? _startAt : _endAt;
+    final controller = TextEditingController(
+      text: current == null
+          ? _formatDateTime(DateTime.now())
+          : _formatDateTime(current),
+    );
+
+    final result = await showDialog<DateTime?>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title:
+              Text(isStart ? 'Изменить время старта' : 'Изменить время конца'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            keyboardType: TextInputType.datetime,
+            decoration: const InputDecoration(
+              hintText: 'DD.MM.YYYY HH:MM',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final parsed = _tryParseManualDateTime(controller.text);
+                if (parsed == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Формат: DD.MM.YYYY HH:MM')),
+                  );
+                  return;
+                }
+                Navigator.pop(context, parsed);
+              },
+              child: const Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (result == null) return;
+
+    setState(() {
+      if (isStart) {
+        _startAt = result;
+      } else {
+        _endAt = result;
+      }
     });
   }
 
@@ -818,7 +1079,10 @@ class _MyHomePageState extends State<MyHomePage> {
                       ),
                       const SizedBox(width: 20),
                       Expanded(
-                        child: _DateBox(dateTime: _startAt),
+                        child: _DateBox(
+                          dateTime: _startAt,
+                          onTap: () => _editDateTime(isStart: true),
+                        ),
                       ),
                     ],
                   ),
@@ -834,7 +1098,10 @@ class _MyHomePageState extends State<MyHomePage> {
                       ),
                       const SizedBox(width: 20),
                       Expanded(
-                        child: _DateBox(dateTime: _endAt),
+                        child: _DateBox(
+                          dateTime: _endAt,
+                          onTap: () => _editDateTime(isStart: false),
+                        ),
                       ),
                     ],
                   ),
@@ -949,9 +1216,10 @@ class _ActionButton extends StatelessWidget {
 }
 
 class _DateBox extends StatelessWidget {
-  const _DateBox({required this.dateTime});
+  const _DateBox({required this.dateTime, this.onTap});
 
   final DateTime? dateTime;
+  final VoidCallback? onTap;
 
   String _formatDateTime(DateTime value) {
     final day = value.day.toString().padLeft(2, '0');
@@ -964,16 +1232,19 @@ class _DateBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 120,
-      color: const Color(0xFFF1F1F1),
-      alignment: Alignment.center,
-      child: Text(
-        dateTime == null ? '' : _formatDateTime(dateTime!),
-        style: const TextStyle(
-          fontSize: 30,
-          fontWeight: FontWeight.w500,
-          color: Colors.black,
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 120,
+        color: const Color(0xFFF1F1F1),
+        alignment: Alignment.center,
+        child: Text(
+          dateTime == null ? '' : _formatDateTime(dateTime!),
+          style: const TextStyle(
+            fontSize: 30,
+            fontWeight: FontWeight.w500,
+            color: Colors.black,
+          ),
         ),
       ),
     );
@@ -1005,143 +1276,6 @@ class _MileageInput extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
         ),
       ),
-    );
-  }
-}
-
-class _DataRow extends StatelessWidget {
-  const _DataRow({
-    required this.label,
-  }) : value = null : valueWidget = null : onTap = null;
-
-  final String label;
-  final String? value;
-  final Widget? valueWidget;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final content = valueWidget ??
-        Text(
-          value ?? '',
-          style: const TextStyle(
-            fontSize: 22,
-            color: Colors.black,
-          ),
-        );
-
-    return Row(
-      children: [
-        Expanded(
-          flex: 2,
-          child: Container(
-            height: 60,
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            alignment: Alignment.centerLeft,
-            decoration: const BoxDecoration(
-              border: Border(
-                right: BorderSide(color: Colors.black54, width: 1.2),
-              ),
-            ),
-            child: onTap == null
-                ? Text(
-                    label,
-                    style: const TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.black,
-                    ),
-                  )
-                : TextButton(
-                    onPressed: onTap,
-                    style: TextButton.styleFrom(
-                      padding: EdgeInsets.zero,
-                      minimumSize: Size.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        label,
-                        style: const TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.black,
-                        ),
-                      ),
-                    ),
-                  ),
-          ),
-        ),
-        Expanded(
-          flex: 3,
-          child: Container(
-            height: 60,
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            alignment: Alignment.centerLeft,
-            child: valueWidget ?? content,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({
-    required this.label,
-    required this.text,
-  });
-
-  final String label;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          flex: 2,
-          child: Container(
-            padding: const EdgeInsets.all(10),
-            alignment: Alignment.topLeft,
-            decoration: const BoxDecoration(
-              border: Border(
-                right: BorderSide(color: Colors.black54, width: 1.2),
-                bottom: BorderSide(color: Colors.black54, width: 1.2),
-              ),
-            ),
-            child: Text(
-              label,
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w500,
-                color: Colors.black,
-              ),
-            ),
-          ),
-        ),
-        Expanded(
-          flex: 5,
-          child: Container(
-            padding: const EdgeInsets.all(10),
-            alignment: Alignment.topLeft,
-            decoration: const BoxDecoration(
-              border: Border(
-                bottom: BorderSide(color: Colors.black54, width: 1.2),
-              ),
-            ),
-            child: Text(
-              text,
-              style: const TextStyle(
-                fontSize: 18,
-                color: Colors.black,
-              ),
-            ),
-          ),
-        ),
-      ],
     );
   }
 }
