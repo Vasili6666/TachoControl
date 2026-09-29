@@ -244,9 +244,9 @@ class _HistoryTable extends StatelessWidget {
                 9: FlexColumnWidth(0.6),
               },
               children: [
-                TableRow(
-                  decoration: const BoxDecoration(color: Color(0xFF73C88B)),
-                  children: const [
+                const TableRow(
+                  decoration: BoxDecoration(color: Color(0xFF73C88B)),
+                  children: [
                     _TableHeaderCell('Date'),
                     _TableHeaderCell('DayWeek'),
                     _TableHeaderCell('StartTime'),
@@ -929,7 +929,7 @@ class _ActionButton extends StatelessWidget {
           foregroundColor: Colors.black,
           elevation: 0,
           padding: EdgeInsets.zero,
-          shape: RoundedRectangleBorder(
+          shape: const RoundedRectangleBorder(
             borderRadius: BorderRadius.zero,
           ),
         ),
@@ -1012,10 +1012,7 @@ class _MileageInput extends StatelessWidget {
 class _DataRow extends StatelessWidget {
   const _DataRow({
     required this.label,
-    this.value,
-    this.valueWidget,
-    this.onTap,
-  });
+  }) : value = null : valueWidget = null : onTap = null;
 
   final String label;
   final String? value;
