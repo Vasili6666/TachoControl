@@ -866,6 +866,7 @@ class MyHomePage extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> {
   DateTime? _startAt;
   DateTime? _endAt;
+  int? _currentShiftId;
   final TextEditingController _mileageController = TextEditingController();
   bool _isMileageEditing = false;
 
@@ -873,6 +874,34 @@ class _MyHomePageState extends State<MyHomePage> {
   void initState() {
     super.initState();
     ShiftDatabase.database;
+  }
+
+  Future<void> _persistShift({bool closeShift = false}) async {
+    final db = await ShiftDatabase.database;
+    final startAt = (_startAt ?? DateTime.now()).toIso8601String();
+    final endAt = closeShift
+        ? (_endAt ?? DateTime.now()).toIso8601String()
+        : _endAt?.toIso8601String();
+    final mileage = _mileageController.text.trim();
+
+    final data = {
+      'start_at': startAt,
+      if (endAt != null) 'end_at': endAt,
+      if (mileage.isNotEmpty) 'mileage': mileage,
+      'created_at': startAt,
+    };
+
+    if (_currentShiftId == null) {
+      _currentShiftId = await db.insert('shifts', data);
+      return;
+    }
+
+    await db.update(
+      'shifts',
+      data,
+      where: 'id = ?',
+      whereArgs: [_currentShiftId],
+    );
   }
 
   static DateTime? _tryParseManualDateTime(String raw) {
@@ -935,15 +964,94 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _setStart() async {
+    final start = DateTime.now();
     setState(() {
-      _startAt = DateTime.now();
+      _startAt = start;
     });
+
+    try {
+      await _persistShift();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Начало смены сохранено')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка сохранения старта: $error')),
+      );
+    }
+  }
+
+  Future<void> _saveMileage() async {
+    final trimmed = _mileageController.text.trim();
+    if (trimmed.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Введите показание километров')),
+      );
+      return;
+    }
+
+    if (_startAt == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Сначала сохраните старт смены')),
+      );
+      return;
+    }
+
+    try {
+      await _persistShift();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Пробег сохранён')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка сохранения пробега: $error')),
+      );
+    }
   }
 
   Future<void> _setEnd() async {
+    final end = DateTime.now();
     setState(() {
-      _endAt = DateTime.now();
+      _endAt = end;
     });
+    try {
+      await _persistShift(closeShift: true);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Смена закрыта и сохранена')),
+      );
+      setState(() {
+        _startAt = null;
+        _endAt = null;
+        _currentShiftId = null;
+        _mileageController.clear();
+        _isMileageEditing = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка закрытия смены: $error')),
+      );
+    }
+  }
+
+  Future<void> _createBackup() async {
+    try {
+      await ShiftDatabase.createCsvBackup();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Резервная копия создана')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка резервного копирования: $error')),
+      );
+    }
   }
 
   Future<void> _editDateTime({required bool isStart}) async {
@@ -1003,52 +1111,6 @@ class _MyHomePageState extends State<MyHomePage> {
     });
   }
 
-  Future<void> _sendToDatabase() async {
-    try {
-      final db = await ShiftDatabase.database;
-
-      await db.insert(
-        'shifts',
-        {
-          'start_at': _startAt?.toIso8601String(),
-          'end_at': _endAt?.toIso8601String(),
-          'mileage': _mileageController.text.trim(),
-          'created_at': DateTime.now().toIso8601String(),
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        _startAt = null;
-        _endAt = null;
-        _mileageController.clear();
-        _isMileageEditing = false;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Данные отправлены в БД')),
-      );
-
-      try {
-        await ShiftDatabase.createCsvBackup();
-      } catch (_) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Данные сохранены, но резервная копия не создана'),
-          ),
-        );
-      }
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка сохранения: $error')),
-      );
-    }
-  }
-
   @override
   void dispose() {
     _mileageController.dispose();
@@ -1065,104 +1127,113 @@ class _MyHomePageState extends State<MyHomePage> {
             width: 900,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _ActionButton(
-                          label: 'START',
-                          color: Colors.green,
-                          onPressed: _setStart,
-                        ),
-                      ),
-                      const SizedBox(width: 20),
-                      Expanded(
-                        child: _DateBox(
-                          dateTime: _startAt,
-                          onTap: () => _editDateTime(isStart: true),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 18),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _ActionButton(
-                          label: 'END',
-                          color: Colors.red,
-                          onPressed: _setEnd,
-                        ),
-                      ),
-                      const SizedBox(width: 20),
-                      Expanded(
-                        child: _DateBox(
-                          dateTime: _endAt,
-                          onTap: () => _editDateTime(isStart: false),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 18),
-                  Center(
-                    child: SizedBox(
-                      width: 420,
-                      child: GestureDetector(
-                        onTap: () {
-                          setState(() {
-                            _isMileageEditing = true;
-                          });
-                        },
-                        child: _isMileageEditing
-                            ? _MileageInput(controller: _mileageController)
-                            : Container(
-                                height: 90,
-                                color: const Color(0xFFEFEFEF),
-                                alignment: Alignment.center,
-                                child: const Text(
-                                  'KM',
-                                  style: TextStyle(
-                                    fontSize: 34,
-                                    fontWeight: FontWeight.w500,
-                                    color: Colors.black,
-                                  ),
-                                ),
-                              ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _ActionButton(
-                          label: 'SEND',
-                          color: Colors.yellow,
-                          onPressed: _sendToDatabase,
-                          height: 120,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 18),
-                  SizedBox(
-                    height: 90,
-                    child: _ActionButton(
-                      label: 'DAYS',
-                      color: Colors.blue,
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const ShiftHistoryPage(),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _ActionButton(
+                            label: 'START',
+                            color: Colors.green,
+                            onPressed: _setStart,
                           ),
-                        );
-                      },
-                      height: 90,
+                        ),
+                        const SizedBox(width: 20),
+                        Expanded(
+                          child: _DateBox(
+                            dateTime: _startAt,
+                            onTap: () => _editDateTime(isStart: true),
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 18),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _ActionButton(
+                            label: 'SAVE KM',
+                            color: Colors.yellow,
+                            onPressed: _saveMileage,
+                            height: 110,
+                          ),
+                        ),
+                        const SizedBox(width: 20),
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: () {
+                              setState(() {
+                                _isMileageEditing = true;
+                              });
+                            },
+                            child: _isMileageEditing
+                                ? _MileageInput(controller: _mileageController)
+                                : Container(
+                                    height: 110,
+                                    color: const Color(0xFFEFEFEF),
+                                    alignment: Alignment.center,
+                                    child: const Text(
+                                      'KM',
+                                      style: TextStyle(
+                                        fontSize: 34,
+                                        fontWeight: FontWeight.w500,
+                                        color: Colors.black,
+                                      ),
+                                    ),
+                                  ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _ActionButton(
+                            label: 'END',
+                            color: Colors.red,
+                            onPressed: _setEnd,
+                          ),
+                        ),
+                        const SizedBox(width: 20),
+                        Expanded(
+                          child: _DateBox(
+                            dateTime: _endAt,
+                            onTap: () => _editDateTime(isStart: false),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    SizedBox(
+                      height: 90,
+                      child: _ActionButton(
+                        label: 'DAYS',
+                        color: Colors.blue,
+                        onPressed: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const ShiftHistoryPage(),
+                            ),
+                          );
+                        },
+                        height: 90,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    SizedBox(
+                      height: 90,
+                      child: _ActionButton(
+                        label: 'BACKUP',
+                        color: Colors.orange,
+                        onPressed: _createBackup,
+                        height: 90,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -1203,6 +1274,7 @@ class _ActionButton extends StatelessWidget {
         child: Center(
           child: Text(
             label,
+            textAlign: TextAlign.center,
             style: const TextStyle(
               fontSize: 42,
               fontWeight: FontWeight.w800,
