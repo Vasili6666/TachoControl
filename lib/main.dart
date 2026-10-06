@@ -1441,6 +1441,13 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
 
+    if (_mileageController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Введите показание километров')),
+      );
+      return;
+    }
+
     final end = DateTime.now();
     setState(() {
       _endAt = end;
@@ -1547,7 +1554,9 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   Widget build(BuildContext context) {
     final canStart = _startAt == null || (_startAt != null && _endAt != null);
-    final canEnd = _startAt != null && _endAt == null;
+    final canEnd = _startAt != null &&
+        _endAt == null &&
+        _mileageController.text.trim().isNotEmpty;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -1600,7 +1609,10 @@ class _MyHomePageState extends State<MyHomePage> {
                               });
                             },
                             child: _isMileageEditing
-                                ? _MileageInput(controller: _mileageController)
+                                ? _MileageInput(
+                                    controller: _mileageController,
+                                    onChanged: (_) => setState(() {}),
+                                  )
                                 : Container(
                                     height: 110,
                                     color: const Color(0xFFEFEFEF),
@@ -1773,9 +1785,13 @@ class _DateBox extends StatelessWidget {
 }
 
 class _MileageInput extends StatelessWidget {
-  const _MileageInput({required this.controller});
+  const _MileageInput({
+    required this.controller,
+    required this.onChanged,
+  });
 
   final TextEditingController controller;
+  final ValueChanged<String> onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1785,6 +1801,7 @@ class _MileageInput extends StatelessWidget {
       alignment: Alignment.center,
       child: TextField(
         controller: controller,
+        onChanged: onChanged,
         keyboardType: TextInputType.number,
         textAlign: TextAlign.center,
         style: const TextStyle(
