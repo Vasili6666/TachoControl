@@ -127,6 +127,154 @@ class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
     }
   }
 
+  Future<void> _editShiftRow(Map<String, Object?> row) async {
+    final id = int.tryParse(row['id']?.toString() ?? '');
+    if (id == null) return;
+
+    final startValue = row['start_at']?.toString() ?? '';
+    final endValue = row['end_at']?.toString() ?? '';
+    final mileageValue = row['mileage']?.toString() ?? '';
+
+    final result = await showDialog<Map<String, String>?>(
+      context: context,
+      builder: (_) => _ShiftEditorDialog(
+        initialStart: startValue,
+        initialEnd: endValue,
+        initialMileage: mileageValue,
+      ),
+    );
+    if (result == null) return;
+
+    try {
+      final startAt = result['startAt'];
+      final endAt = result['endAt'];
+      final mileage = result['mileage'];
+
+      final start = startAt == null || startAt.isEmpty
+          ? null
+          : DateTime.tryParse(startAt)?.toIso8601String();
+      final end = endAt == null || endAt.isEmpty
+          ? null
+          : DateTime.tryParse(endAt)?.toIso8601String();
+
+      await ShiftDatabase.updateShiftRow(
+        id: id,
+        startAt: start,
+        endAt: end,
+        mileage: mileage,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _rowsFuture = ShiftDatabase.getLast56Days();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка редактирования строки: $error')),
+      );
+    }
+  }
+
+  Future<void> _editCellValue({
+    required Map<String, Object?> row,
+    required String field,
+    required String currentValue,
+  }) async {
+    final id = int.tryParse(row['id']?.toString() ?? '');
+    if (id == null) return;
+
+    String normalizedCurrentValue = currentValue;
+    if (field == 'start_at' || field == 'end_at') {
+      final parsed = DateTime.tryParse(currentValue);
+      if (parsed != null) {
+        normalizedCurrentValue =
+            '${parsed.year.toString().padLeft(4, '0')}-${parsed.month.toString().padLeft(2, '0')}-${parsed.day.toString().padLeft(2, '0')} ${parsed.hour.toString().padLeft(2, '0')}:${parsed.minute.toString().padLeft(2, '0')}';
+      }
+    }
+
+    final controller = TextEditingController(text: normalizedCurrentValue);
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Изменить $field'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: field == 'mileage'
+              ? TextInputType.number
+              : TextInputType.datetime,
+          decoration: InputDecoration(
+            hintText: field == 'mileage' ? '12345' : 'YYYY-MM-DD HH:MM',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == null) return;
+
+    try {
+      if (field == 'start_at') {
+        final parsed = DateTime.tryParse(result.replaceAll(' ', 'T'));
+        if (parsed == null) {
+          throw Exception('Неверный формат времени старта');
+        }
+        final rounded = DateTime(
+          parsed.year,
+          parsed.month,
+          parsed.day,
+          parsed.hour,
+          parsed.minute,
+        );
+        await ShiftDatabase.updateShiftRow(
+          id: id,
+          startAt: rounded.toIso8601String(),
+        );
+      } else if (field == 'end_at') {
+        final parsed = DateTime.tryParse(result.replaceAll(' ', 'T'));
+        if (parsed == null) {
+          throw Exception('Неверный формат времени конца');
+        }
+        final rounded = DateTime(
+          parsed.year,
+          parsed.month,
+          parsed.day,
+          parsed.hour,
+          parsed.minute,
+        );
+        await ShiftDatabase.updateShiftRow(
+          id: id,
+          endAt: rounded.toIso8601String(),
+        );
+      } else if (field == 'mileage') {
+        await ShiftDatabase.updateShiftRow(
+          id: id,
+          mileage: result,
+        );
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _rowsFuture = ShiftDatabase.getLast56Days();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка редактирования: $error')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -177,6 +325,8 @@ class _ShiftHistoryPageState extends State<ShiftHistoryPage> {
               rows: rows,
               onDelete: _deleteRow,
               onEditComment: _editComment,
+              onEditShift: _editShiftRow,
+              onEditCellValue: _editCellValue,
             );
           },
         ),
@@ -190,11 +340,19 @@ class _HistoryTable extends StatelessWidget {
     required this.rows,
     required this.onDelete,
     required this.onEditComment,
+    required this.onEditShift,
+    required this.onEditCellValue,
   });
 
   final List<Map<String, Object?>> rows;
   final Future<void> Function(int id) onDelete;
   final Future<void> Function(int id, String comment) onEditComment;
+  final Future<void> Function(Map<String, Object?> row) onEditShift;
+  final Future<void> Function({
+    required Map<String, Object?> row,
+    required String field,
+    required String currentValue,
+  }) onEditCellValue;
 
   String _formatDate(String value) {
     final date = DateTime.tryParse(value);
@@ -327,10 +485,34 @@ class _HistoryTable extends StatelessWidget {
                             : const Color(0xFFF0F0F0),
                       ),
                       children: [
-                        _TableCell(_formatDate(start)),
-                        _TableCell(_formatDay(start)),
-                        _TableCell(_formatTime(start)),
-                        _TableCell(_formatTime(end)),
+                        GestureDetector(
+                          onTap: id == null ? null : () => onEditShift(row),
+                          child: _TableCell(_formatDate(start)),
+                        ),
+                        GestureDetector(
+                          onTap: id == null ? null : () => onEditShift(row),
+                          child: _TableCell(_formatDay(start)),
+                        ),
+                        GestureDetector(
+                          onTap: id == null
+                              ? null
+                              : () => onEditCellValue(
+                                    row: row,
+                                    field: 'start_at',
+                                    currentValue: start,
+                                  ),
+                          child: _TableCell(_formatTime(start)),
+                        ),
+                        GestureDetector(
+                          onTap: id == null
+                              ? null
+                              : () => onEditCellValue(
+                                    row: row,
+                                    field: 'end_at',
+                                    currentValue: end,
+                                  ),
+                          child: _TableCell(_formatTime(end)),
+                        ),
                         _TableCell(_formatWork(start, end)),
                         _TableCell(rest),
                         _TableCell(
@@ -341,7 +523,16 @@ class _HistoryTable extends StatelessWidget {
                                   ? Colors.red.shade700
                                   : Colors.black,
                         ),
-                        _TableCell(mileage),
+                        GestureDetector(
+                          onTap: id == null
+                              ? null
+                              : () => onEditCellValue(
+                                    row: row,
+                                    field: 'mileage',
+                                    currentValue: mileage,
+                                  ),
+                          child: _TableCell(mileage),
+                        ),
                         _TableCell(
                           _formatKilometers(mileage, previousMileage),
                         ),
@@ -351,8 +542,16 @@ class _HistoryTable extends StatelessWidget {
                               ? null
                               : () => onEditComment(id, comment),
                         ),
-                        _DeleteCell(
-                          onPressed: id == null ? null : () => onDelete(id),
+                        Row(
+                          children: [
+                            _EditCell(
+                              onPressed:
+                                  id == null ? null : () => onEditShift(row),
+                            ),
+                            _DeleteCell(
+                              onPressed: id == null ? null : () => onDelete(id),
+                            ),
+                          ],
                         ),
                       ],
                     );
@@ -421,6 +620,26 @@ class _TableCell extends StatelessWidget {
   }
 }
 
+class _EditCell extends StatelessWidget {
+  const _EditCell({required this.onPressed});
+
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 42,
+      child: IconButton(
+        onPressed: onPressed,
+        padding: EdgeInsets.zero,
+        iconSize: 16,
+        tooltip: 'Редактировать строку',
+        icon: const Icon(Icons.edit_note_outlined, color: Colors.blue),
+      ),
+    );
+  }
+}
+
 class _DeleteCell extends StatelessWidget {
   const _DeleteCell({required this.onPressed});
 
@@ -437,6 +656,126 @@ class _DeleteCell extends StatelessWidget {
         tooltip: 'Удалить строку',
         icon: const Icon(Icons.delete_outline, color: Colors.red),
       ),
+    );
+  }
+}
+
+class _ShiftEditorDialog extends StatefulWidget {
+  const _ShiftEditorDialog({
+    required this.initialStart,
+    required this.initialEnd,
+    required this.initialMileage,
+  });
+
+  final String initialStart;
+  final String initialEnd;
+  final String initialMileage;
+
+  @override
+  State<_ShiftEditorDialog> createState() => _ShiftEditorDialogState();
+}
+
+class _ShiftEditorDialogState extends State<_ShiftEditorDialog> {
+  late final TextEditingController _startController;
+  late final TextEditingController _endController;
+  late final TextEditingController _mileageController;
+
+  String _toEditableDateTime(String value) {
+    final parsed = DateTime.tryParse(value);
+    if (parsed == null) return value;
+    return '${parsed.year.toString().padLeft(4, '0')}-${parsed.month.toString().padLeft(2, '0')}-${parsed.day.toString().padLeft(2, '0')} ${parsed.hour.toString().padLeft(2, '0')}:${parsed.minute.toString().padLeft(2, '0')}';
+  }
+
+  DateTime? _parseEditableDateTime(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    return DateTime.tryParse(trimmed.replaceAll(' ', 'T'));
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _startController =
+        TextEditingController(text: _toEditableDateTime(widget.initialStart));
+    _endController =
+        TextEditingController(text: _toEditableDateTime(widget.initialEnd));
+    _mileageController = TextEditingController(text: widget.initialMileage);
+  }
+
+  @override
+  void dispose() {
+    _startController.dispose();
+    _endController.dispose();
+    _mileageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Редактировать смену'),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _startController,
+              decoration: const InputDecoration(labelText: 'Start ISO'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _endController,
+              decoration: const InputDecoration(labelText: 'End ISO'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _mileageController,
+              decoration: const InputDecoration(labelText: 'Mileage'),
+              keyboardType: TextInputType.number,
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Отмена'),
+        ),
+        FilledButton(
+          onPressed: () {
+            final startAt = _startController.text.trim();
+            final endAt = _endController.text.trim();
+            final mileage = _mileageController.text.trim();
+
+            final startDate = _parseEditableDateTime(startAt);
+            final endDate = _parseEditableDateTime(endAt);
+
+            Navigator.pop(context, {
+              'startAt': startDate == null
+                  ? startAt
+                  : DateTime(
+                      startDate.year,
+                      startDate.month,
+                      startDate.day,
+                      startDate.hour,
+                      startDate.minute,
+                    ).toIso8601String(),
+              'endAt': endDate == null
+                  ? endAt
+                  : DateTime(
+                      endDate.year,
+                      endDate.month,
+                      endDate.day,
+                      endDate.hour,
+                      endDate.minute,
+                    ).toIso8601String(),
+              'mileage': mileage,
+            });
+          },
+          child: const Text('Сохранить'),
+        ),
+      ],
     );
   }
 }
@@ -616,6 +955,28 @@ class ShiftDatabase {
     await db.update(
       'shifts',
       {'comments': comment},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  static Future<void> updateShiftRow({
+    required int id,
+    String? startAt,
+    String? endAt,
+    String? mileage,
+  }) async {
+    final db = await database;
+    final data = <String, Object>{};
+    if (startAt != null) data['start_at'] = startAt;
+    if (endAt != null) data['end_at'] = endAt;
+    if (mileage != null) data['mileage'] = mileage;
+
+    if (data.isEmpty) return;
+
+    await db.update(
+      'shifts',
+      data,
       where: 'id = ?',
       whereArgs: [id],
     );
@@ -874,10 +1235,57 @@ class _MyHomePageState extends State<MyHomePage> {
   void initState() {
     super.initState();
     ShiftDatabase.database;
+    _restoreCurrentShift();
+  }
+
+  Future<void> _restoreCurrentShift() async {
+    final db = await ShiftDatabase.database;
+    final rows = await db.query(
+      'shifts',
+      where: 'end_at IS NULL OR end_at = ?',
+      whereArgs: [''],
+      orderBy: 'created_at DESC',
+      limit: 1,
+    );
+
+    if (rows.isEmpty || !mounted) return;
+
+    final row = rows.first;
+    final startAt = row['start_at']?.toString();
+    if (startAt == null || startAt.isEmpty) return;
+
+    final parsedStart = DateTime.tryParse(startAt);
+    if (parsedStart == null) return;
+
+    final parsedEnd = row['end_at']?.toString();
+    setState(() {
+      _currentShiftId = row['id'] as int?;
+      _startAt = parsedStart;
+      _endAt = parsedEnd == null || parsedEnd.isEmpty
+          ? null
+          : DateTime.tryParse(parsedEnd);
+      final mileage = row['mileage']?.toString() ?? '';
+      _mileageController.text = mileage;
+      _isMileageEditing = false;
+    });
   }
 
   Future<void> _persistShift({bool closeShift = false}) async {
     final db = await ShiftDatabase.database;
+
+    if (_currentShiftId == null) {
+      final rows = await db.query(
+        'shifts',
+        where: 'end_at IS NULL OR end_at = ?',
+        whereArgs: [''],
+        orderBy: 'created_at DESC',
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        _currentShiftId = rows.first['id'] as int?;
+      }
+    }
+
     final startAt = (_startAt ?? DateTime.now()).toIso8601String();
     final endAt = closeShift
         ? (_endAt ?? DateTime.now()).toIso8601String()
@@ -964,9 +1372,21 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _setStart() async {
+    if (_startAt != null && _endAt == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Старт уже сохранён для текущей смены')),
+      );
+      return;
+    }
+
+    if (_startAt != null && _endAt != null) {
+      _currentShiftId = null;
+    }
+
     final start = DateTime.now();
     setState(() {
       _startAt = start;
+      _endAt = null;
     });
 
     try {
@@ -1014,6 +1434,13 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _setEnd() async {
+    if (_startAt == null || _endAt != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Сначала сохраните старт смены')),
+      );
+      return;
+    }
+
     final end = DateTime.now();
     setState(() {
       _endAt = end;
@@ -1119,6 +1546,9 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final canStart = _startAt == null || (_startAt != null && _endAt != null);
+    final canEnd = _startAt != null && _endAt == null;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
@@ -1137,7 +1567,8 @@ class _MyHomePageState extends State<MyHomePage> {
                           child: _ActionButton(
                             label: 'START',
                             color: Colors.green,
-                            onPressed: _setStart,
+                            onPressed: canStart ? _setStart : null,
+                            showCheck: _startAt != null && _endAt == null,
                           ),
                         ),
                         const SizedBox(width: 20),
@@ -1194,7 +1625,8 @@ class _MyHomePageState extends State<MyHomePage> {
                           child: _ActionButton(
                             label: 'END',
                             color: Colors.red,
-                            onPressed: _setEnd,
+                            onPressed: canEnd ? _setEnd : null,
+                            showCheck: _endAt != null,
                           ),
                         ),
                         const SizedBox(width: 20),
@@ -1249,12 +1681,14 @@ class _ActionButton extends StatelessWidget {
     required this.color,
     required this.onPressed,
     this.height = 120,
+    this.showCheck = false,
   });
 
   final String label;
   final Color color;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
   final double height;
+  final bool showCheck;
 
   @override
   Widget build(BuildContext context) {
@@ -1267,19 +1701,34 @@ class _ActionButton extends StatelessWidget {
           foregroundColor: Colors.black,
           elevation: 0,
           padding: EdgeInsets.zero,
+          disabledBackgroundColor: color.withOpacity(0.7),
           shape: const RoundedRectangleBorder(
             borderRadius: BorderRadius.zero,
           ),
         ),
         child: Center(
-          child: Text(
-            label,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 42,
-              fontWeight: FontWeight.w800,
-              letterSpacing: 1,
-            ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 42,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1,
+                    ),
+                  ),
+                ),
+              ),
+              if (showCheck) ...[
+                const SizedBox(width: 8),
+                const Icon(Icons.check, size: 28),
+              ],
+            ],
           ),
         ),
       ),
