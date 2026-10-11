@@ -442,8 +442,9 @@ class _HistoryTable extends StatelessWidget {
                   6: FlexColumnWidth(0.8),
                   7: FlexColumnWidth(1.2),
                   8: FlexColumnWidth(0.9),
-                  9: FlexColumnWidth(2.2),
-                  10: FlexColumnWidth(0.6),
+                  9: FlexColumnWidth(1.5),
+                  10: FixedColumnWidth(40),
+                  11: FixedColumnWidth(40),
                 },
                 children: [
                   const TableRow(
@@ -459,6 +460,7 @@ class _HistoryTable extends StatelessWidget {
                       _TableHeaderCell('Odometer'),
                       _TableHeaderCell('Kilometer'),
                       _TableHeaderCell('Comments'),
+                      _TableHeaderCell(''),
                       _TableHeaderCell(''),
                     ],
                   ),
@@ -542,16 +544,11 @@ class _HistoryTable extends StatelessWidget {
                               ? null
                               : () => onEditComment(id, comment),
                         ),
-                        Row(
-                          children: [
-                            _EditCell(
-                              onPressed:
-                                  id == null ? null : () => onEditShift(row),
-                            ),
-                            _DeleteCell(
-                              onPressed: id == null ? null : () => onDelete(id),
-                            ),
-                          ],
+                        _DeleteCell(
+                          onPressed: id == null ? null : () => onDelete(id),
+                        ),
+                        _EditCell(
+                          onPressed: id == null ? null : () => onEditShift(row),
                         ),
                       ],
                     );
@@ -632,7 +629,8 @@ class _EditCell extends StatelessWidget {
       child: IconButton(
         onPressed: onPressed,
         padding: EdgeInsets.zero,
-        iconSize: 16,
+        iconSize: 18,
+        constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
         tooltip: 'Редактировать строку',
         icon: const Icon(Icons.edit_note_outlined, color: Colors.blue),
       ),
@@ -652,7 +650,8 @@ class _DeleteCell extends StatelessWidget {
       child: IconButton(
         onPressed: onPressed,
         padding: EdgeInsets.zero,
-        iconSize: 16,
+        iconSize: 18,
+        constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
         tooltip: 'Удалить строку',
         icon: const Icon(Icons.delete_outline, color: Colors.red),
       ),
@@ -1125,6 +1124,14 @@ class ShiftDatabase {
     await _createCsvFile('tachocontrol_backup');
   }
 
+  static Future<void> createCsvBackupIfDataExists() async {
+    final db = await database;
+    final rows = await db.query('shifts', columns: ['id'], limit: 1);
+    if (rows.isEmpty) return;
+
+    await createCsvBackup();
+  }
+
   static Future<String> exportCsv() async {
     final file = await _createCsvFile('tachocontrol_export');
     await Share.shareXFiles(
@@ -1234,40 +1241,59 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void initState() {
     super.initState();
-    ShiftDatabase.database;
     _restoreCurrentShift();
   }
 
   Future<void> _restoreCurrentShift() async {
-    final db = await ShiftDatabase.database;
-    final rows = await db.query(
-      'shifts',
-      where: 'end_at IS NULL OR end_at = ?',
-      whereArgs: [''],
-      orderBy: 'created_at DESC',
-      limit: 1,
-    );
+    try {
+      final db = await ShiftDatabase.database;
+      final rows = await db.query(
+        'shifts',
+        where: 'end_at IS NULL OR end_at = ?',
+        whereArgs: [''],
+        orderBy: 'created_at DESC',
+        limit: 1,
+      );
 
-    if (rows.isEmpty || !mounted) return;
+      if (rows.isNotEmpty && mounted) {
+        final row = rows.first;
+        final startAt = row['start_at']?.toString();
+        final parsedStart = startAt == null || startAt.isEmpty
+            ? null
+            : DateTime.tryParse(startAt);
 
-    final row = rows.first;
-    final startAt = row['start_at']?.toString();
-    if (startAt == null || startAt.isEmpty) return;
+        if (parsedStart != null) {
+          final parsedEnd = row['end_at']?.toString();
+          setState(() {
+            _currentShiftId = row['id'] as int?;
+            _startAt = parsedStart;
+            _endAt = parsedEnd == null || parsedEnd.isEmpty
+                ? null
+                : DateTime.tryParse(parsedEnd);
+            final mileage = row['mileage']?.toString() ?? '';
+            _mileageController.text = mileage;
+            _isMileageEditing = false;
+          });
+        }
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка загрузки данных: $error')),
+        );
+      }
+      return;
+    }
 
-    final parsedStart = DateTime.tryParse(startAt);
-    if (parsedStart == null) return;
-
-    final parsedEnd = row['end_at']?.toString();
-    setState(() {
-      _currentShiftId = row['id'] as int?;
-      _startAt = parsedStart;
-      _endAt = parsedEnd == null || parsedEnd.isEmpty
-          ? null
-          : DateTime.tryParse(parsedEnd);
-      final mileage = row['mileage']?.toString() ?? '';
-      _mileageController.text = mileage;
-      _isMileageEditing = false;
-    });
+    if (!mounted) return;
+    try {
+      await ShiftDatabase.createCsvBackupIfDataExists();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось создать резервную копию: $error')),
+      );
+    }
   }
 
   Future<void> _persistShift({bool closeShift = false}) async {
